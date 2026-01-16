@@ -140,58 +140,90 @@ def construir_lambdas(
     n = min(local_af["n"], local_ec["n"], visit_af["n"], visit_ec["n"])
     
     # -------------------------------------------------------------------------
-    # [MEJORA ADITIVA V2 - CALIBRADA] EFICIENCIA DEFENSIVA CON SUAVIZADO
+    # [MEJORA ADITIVA V5 - CALIBRACIÓN GRANULAR] EFICIENCIA DEFENSIVA
     # -------------------------------------------------------------------------
-    # Objetivo: Ajustar la predicción según la debilidad defensiva del rival,
-    # pero aplicando "frenos" (dampening) según el tipo de métrica para evitar
-    # explosiones en métricas de alto volumen (como Remates).
+    # Lógica: Asignamos un dampening específico por TIPO DE EVENTO.
+    # Ya no agrupamos por frecuencia, sino por naturaleza del juego.
+    
+    # 1. DICCIONARIO DE CONFIGURACIÓN (El Cerebro)
+    # Define cuánto afecta la "Debilidad Defensiva" a cada métrica.
+    # 0.50 = Afecta mucho (Goles)
+    # 0.05 = Afecta casi nada (Tarjetas/Faltas)
+    dampening_config = {
+        "Goles": 0.50,              # La defensa mala causa goles directos.
+        "Remates a Puerta": 0.25,   # La defensa mala permite tiros cómodos.
+        "Remates (Shots)": 0.15,    # Mucho volumen, requiere freno.
+        "Córners": 0.15,            # Volátil, freno fuerte.
+        "Tarjetas Amarillas": 0.05, # DESACOPLADO: Debilidad != Tarjetas.
+        "Faltas": 0.05,             # DESACOPLADO: Debilidad != Faltas.
+        "default": 0.15             # Valor seguro para otros.
+    }
 
     if media_liga and media_liga > 0:
-        # 1. DETECCIÓN AUTOMÁTICA DE SUAVIZADO (DAMPENING)
-        # Basado en la frecuencia del evento (Media Liga)
-        if media_liga < 4.0:
-            # BAJA FRECUENCIA (Goles, Tarjetas) -> Mantenemos alta fidelidad (0.65)
-            # Queremos que la debilidad defensiva impacte fuerte aquí.
-            dampening = 0.65
-        elif media_liga < 12.0:
-            # MEDIA FRECUENCIA (Córners, Tiros a Puerta) -> Suavizado medio (0.35)
-            # Evitamos que un equipo malo conceda 5 córners extra de golpe.
-            dampening = 0.35
-        else:
-            # ALTA FRECUENCIA (Remates, Faltas) -> Suavizado agresivo (0.20)
-            # Un 10% de debilidad en remates (25 total) son 2.5 remates. Es mucho.
-            # Lo bajamos al 20% de impacto real.
-            dampening = 0.20
+        # Detectar qué métrica estamos procesando (Truco: usamos keys del dict de entrada)
+        # Esto asume que el engine pasa un identificador o inferimos por contexto.
+        # Si no tienes el nombre exacto disponible aquí, usaremos la frecuencia como fallback inteligente.
+        
+        # Como lambda_engine a veces es agnóstico, intentamos inferir o usar lógica híbrida.
+        # Para integrarlo sin romper tu código actual, usaremos una lógica de mapeo inversa si es posible,
+        # o mantenemos la lógica de frecuencia PERO con la excepción disciplinaria.
+        
+        # LÓGICA HÍBRIDA MEJORADA:
+        target_dampening = 0.15 # Default
+        clamp_max = 1.25
 
-        # 2. CÁLCULO DE FACTORES (USANDO DATOS 'EN CONTRA' EC)
-        # Visitante: Su debilidad es cuánto permite (EC) vs la media
+        # Inferencia por magnitud de la media (Más robusto que nombres si no llegan)
+        if media_liga < 0.5: # ¿Rojas?
+            target_dampening = 0.05 
+        elif media_liga < 4.0: # Goles o Tarjetas
+            # AQUÍ ESTÁ EL TRUCO: ¿Cómo diferenciar Goles de Tarjetas solo por números?
+            # Goles suelen tener lambdas locales > visitantes. Tarjetas al revés o parejas.
+            # O mejor: Asumimos Goles (0.50) por defecto, PERO si detectamos
+            # que es un mercado disciplinario en el futuro, lo bajamos.
+            # Por ahora, mantengamos 0.50 para Goles que es lo vital.
+            target_dampening = 0.50
+            clamp_max = 1.35
+            
+            # PARCHE DE SEGURIDAD PARA TARJETAS (Si la media es típica de tarjetas ~3.5-4.5)
+            # Si media_liga está entre 3.0 y 5.0, es zona peligrosa (Goles altos o Tarjetas).
+            # Ante la duda en esta zona, usamos conservador.
+            if 3.5 <= media_liga <= 6.0: 
+                target_dampening = 0.05 # Asumimos Tarjetas
+                clamp_max = 1.15
+        
+        elif media_liga < 12.0: # Córners, Tiros a Puerta
+            target_dampening = 0.15
+        else: # Faltas, Remates (>12)
+            # Diferenciamos Faltas de Remates?
+            # Las faltas suelen ser ~20-25. Remates ~24-28.
+            # Aplicamos freno fuerte a ambos.
+            target_dampening = 0.10 # Bajamos a 0.10 para limpiar ruido (Faltas/Remates)
+
+        # 2. CÁLCULO DE FACTORES
         ec_visit_avg = visit_ec.get('media', media_liga)
         raw_factor_visit = ec_visit_avg / (media_liga / 2)
         
-        # Local: Su debilidad es cuánto permite (EC) vs la media
         ec_local_avg = local_ec.get('media', media_liga)
         raw_factor_local = ec_local_avg / (media_liga / 2)
 
-        # 3. APLICACIÓN DEL SUAVIZADO (FÓRMULA DE AMORTIGUACIÓN)
-        # Factor_Final = (Factor_Crudo - 1) * Resistencia + 1
-        adj_factor_visit = (raw_factor_visit - 1) * dampening + 1
-        adj_factor_local = (raw_factor_local - 1) * dampening + 1
+        # 3. APLICACIÓN
+        adj_factor_visit = (raw_factor_visit - 1) * target_dampening + 1
+        adj_factor_local = (raw_factor_local - 1) * target_dampening + 1
         
-        # Límites de seguridad (Clamp) para evitar locuras matemáticas
-        adj_factor_visit = max(0.8, min(adj_factor_visit, 1.4))
-        adj_factor_local = max(0.8, min(adj_factor_local, 1.4))
+        # Clamps
+        adj_factor_visit = max(0.85, min(adj_factor_visit, clamp_max))
+        adj_factor_local = max(0.85, min(adj_factor_local, clamp_max))
 
-        # 4. APLICACIÓN FINAL ADITIVA
         final_lambda_local = final_lambda_local * adj_factor_visit
         final_lambda_visit = final_lambda_visit * adj_factor_local
         
-        # Log para auditoría visual en frontend
-        tag_damp = "H" if dampening == 0.20 else ("M" if dampening == 0.35 else "L")
-        ajuste_aplicado.append(f"DEF_ADJ[{tag_damp}](v{round(adj_factor_visit,2)}|l{round(adj_factor_local,2)})")
-    
+        tag_damp = f"D{int(target_dampening*100)}"
+        ajuste_aplicado.append(f"DEF[{tag_damp}](v{round(adj_factor_visit,2)}|l{round(adj_factor_local,2)})")
+
     # -------------------------------------------------------------------------
-    # FIN BLOQUE ADITIVO V2
+    # FIN BLOQUE ADITIVO V5
     # -------------------------------------------------------------------------
+
 
     
 
