@@ -1,10 +1,13 @@
 # =============================================================================
-# LAMBDA_ENGINE.PY — MOTOR INTELIGENTE V5.0 (CONTEXT AWARE)
+# LAMBDA_ENGINE.PY — MOTOR INTELIGENTE V9.0 (FULL STACK)
 # -----------------------------------------------------------------------------
 # 1. Modelo Base: Multiplicativo (Ataque * Defensa / Media)
 # 2. Capa Contextual: Ajuste por Strength of Schedule (SoS)
 # 3. Capa Adaptativa: Regresión a la media basada en Volatilidad (CV)
+# 4. Capa Calibración V9: Ajuste fino por correlación de métricas (Bundesliga)
 # =============================================================================
+
+import math
 
 def construir_lambdas(
     local_af: dict,
@@ -12,236 +15,225 @@ def construir_lambdas(
     visit_af: dict,
     visit_ec: dict,
     media_liga: float = None,
-    sos_factors: dict = None
+    sos_factors: dict = None,
+    tipo_evento: str = "default"  # <--- ARGUMENTO CLAVE PARA V9
 ):
     """
-    Construye las Lambdas de Poisson aplicando lógica avanzada de contexto.
+    Construye las Lambdas de Poisson aplicando 4 capas de refinamiento lógico.
     
     Args:
         local_af, local_ec: Estadísticas del Local (A favor/En contra)
+            -> Espera dict con keys: {'lambda', 'cv', 'n', 'valido', ...}
         visit_af, visit_ec: Estadísticas del Visitante
-        media_liga: Promedio de goles/eventos de la liga (Global)
-        sos_factors: (Opcional) Diccionario con factores de ajuste por rival.
-                     Ej: {'local_attack': 1.1, 'visit_defense': 0.9}
+        media_liga: Promedio global de la liga para este evento.
+        sos_factors: Factores de fuerza de calendario (opcional).
+        tipo_evento: Nombre del evento ('Goles', 'Remates', etc.) para calibración V9.
     """
 
     # -------------------------------------------------------------------------
-    # 1. VALIDACIÓN DE INTEGRIDAD
+    # 0. VALIDACIÓN DE INTEGRIDAD (SAFETY FIRST)
     # -------------------------------------------------------------------------
     inputs = [local_af, local_ec, visit_af, visit_ec]
 
+    # Validación de tipos
     if not all(isinstance(m, dict) for m in inputs):
-        raise ValueError("Error Crítico: Los inputs estadísticos deben ser diccionarios.")
+        raise ValueError("Error Crítico LambdaEngine: Los inputs deben ser diccionarios.")
 
-    if not all(m.get("valido", False) for m in inputs):
-        raise ValueError("Error Crítico: Uno o más bloques de datos son inválidos o insuficientes.")
+    # Validación de datos mínimos requeridos
+    # Permitimos continuar si 'lambda' existe, aunque 'valido' sea False (modo fallback)
+    if not all("lambda" in m for m in inputs):
+        raise ValueError("Error Crítico LambdaEngine: Estructura de datos incompleta (falta 'lambda').")
 
-    # -------------------------------------------------------------------------
-    # 2. EXTRACCIÓN DE DATOS BASE
-    # -------------------------------------------------------------------------
-    l_local_af = local_af["lambda"]
-    l_local_ec = local_ec["lambda"]
-    l_visit_af = visit_af["lambda"]
-    l_visit_ec = visit_ec["lambda"]
-    
-    # Extraemos la volatilidad (CV) para el ajuste adaptativo
-    # Si no existe CV (versiones viejas), asumimos 0.0 (estable)
-    cv_local_af = local_af.get("cv", 0.0)
-    cv_visit_af = visit_af.get("cv", 0.0)
+    # Extracción de N (tamaño de muestra efectivo)
+    n_values = [m.get("n", 0) for m in inputs]
+    n_efectivo = min(n_values) if n_values else 0
 
-    metodo_usado = "LINEAL"
     ajuste_aplicado = []
+    metodo_usado = "LINEAL" # Default si falla todo
 
     # -------------------------------------------------------------------------
-    # 3. CÁLCULO BASE (EL MOTOR)
+    # 1. EXTRACCIÓN DE DATOS BASE
     # -------------------------------------------------------------------------
+    l_local_af = float(local_af.get("lambda", 0.0))
+    l_local_ec = float(local_ec.get("lambda", 0.0))
+    l_visit_af = float(visit_af.get("lambda", 0.0))
+    l_visit_ec = float(visit_ec.get("lambda", 0.0))
     
-    # Si no hay media de liga, usamos 2.5 goles (o 1.25 por equipo) como ancla teórica
-    # para evitar divisiones peligrosas, o hacemos fallback al lineal.
-    media_referencia = media_liga if (media_liga is not None and media_liga > 0) else 2.5
+    # Extraemos CV (Coeficiente de Variación) para la capa adaptativa
+    cv_local_af = float(local_af.get("cv", 0.0))
+    cv_visit_af = float(visit_af.get("cv", 0.0))
+    
+    # Media de referencia segura
+    media_ref = media_liga if (media_liga is not None and media_liga > 0) else 2.5
 
-    if media_liga is not None and media_liga > 0:
+    # -------------------------------------------------------------------------
+    # 2. CAPA BASE: MODELO MULTIPLICATIVO (DIXON-COLES STANDARD)
+    # -------------------------------------------------------------------------
+    # Exp_Local = (Ataque_Local * Defensa_Visitante) / Media_Liga
+    
+    if media_liga and media_liga > 0:
         try:
-            # FÓRMULA MULTIPLICATIVA (Dixcon-Coles Standard)
-            # Exp_Local = (Fuerza_Ataque_Local * Fuerza_Defensa_Visit) * Media_Global
-            # Donde Fuerza = Lambda_Equipo / Media_Global_Local_o_Visit
-            # Simplificación Algebraica: (Local_AF * Visit_EC) / Media_Liga
-            
             raw_lambda_local = (l_local_af * l_visit_ec) / media_liga
             raw_lambda_visit = (l_visit_af * l_local_ec) / media_liga
-            
             metodo_usado = "MULTIPLICATIVO"
         except ZeroDivisionError:
-            # Fallback matemático extremo
+            # Fallback a promedio simple si media_liga es 0 (improbable)
             raw_lambda_local = (l_local_af + l_visit_ec) / 2
             raw_lambda_visit = (l_visit_af + l_local_ec) / 2
-            metodo_usado = "LINEAL (Error Div0)"
+            metodo_usado = "LINEAL (Div0)"
     else:
-        # FÓRMULA LINEAL (Promedio Simple)
+        # Fallback Lineal
         raw_lambda_local = (l_local_af + l_visit_ec) / 2
         raw_lambda_visit = (l_visit_af + l_local_ec) / 2
         metodo_usado = "LINEAL (Sin Media)"
 
     # -------------------------------------------------------------------------
-    # 4. CAPA CONTEXTUAL: STRENGTH OF SCHEDULE (SoS)
+    # 3. CAPA CONTEXTUAL: STRENGTH OF SCHEDULE (SoS)
     # -------------------------------------------------------------------------
-    # Esta capa premia o castiga según la calidad de los rivales pasados.
-    # Si no se proveen factores, se asume neutralidad (1.0).
+    # Ajusta la fuerza base según la calidad de los rivales enfrentados previamente.
     
-    sos_l_att = 1.0
-    sos_v_att = 1.0
-    
+    lambda_local_sos = raw_lambda_local
+    lambda_visit_sos = raw_lambda_visit
+
     if sos_factors:
-        sos_l_att = sos_factors.get("local_attack", 1.0)
-        sos_v_att = sos_factors.get("visit_attack", 1.0)
-        # Podríamos añadir factores defensivos aquí también
+        sos_l = sos_factors.get("local_attack", 1.0)
+        sos_v = sos_factors.get("visit_attack", 1.0)
         
-        if sos_l_att != 1.0 or sos_v_att != 1.0:
+        lambda_local_sos *= sos_l
+        lambda_visit_sos *= sos_v
+        
+        if sos_l != 1.0 or sos_v != 1.0:
             ajuste_aplicado.append("SoS")
 
-    # Aplicamos el ajuste SoS
-    lambda_local_sos = raw_lambda_local * sos_l_att
-    lambda_visit_sos = raw_lambda_visit * sos_v_att
-
     # -------------------------------------------------------------------------
-    # 5. CAPA ADAPTATIVA: REGRESIÓN POR VOLATILIDAD
+    # 4. CAPA ADAPTATIVA: REGRESIÓN A LA MEDIA (VOLATILIDAD)
     # -------------------------------------------------------------------------
-    # Si un equipo es muy inestable (CV alto), su promedio es poco confiable.
-    # Lo "regresamos" hacia la media de la liga para reducir el riesgo de sobreestimación.
+    # Si un equipo tiene un CV muy alto (es inestable), desconfiamos de su promedio
+    # y lo "regresamos" matemáticamente hacia la media de la liga.
+    # Esta era la lógica que echabas de menos.
     
-    def aplicar_dampening(valor, cv, media_ref):
-        # Umbral de CV donde empezamos a desconfiar
-        CV_THRESHOLD = 0.50
-        if cv <= CV_THRESHOLD:
+    def aplicar_regresion_volatilidad(valor, cv, media_global):
+        """
+        Aplica 'Shrinkage' hacia la media global si la volatilidad es alta.
+        """
+        CV_THRESHOLD_CAUTION = 0.50  # Si CV > 0.50, empezamos a ajustar
+        MAX_DAMPENING = 0.30         # Máximo ajuste del 30% hacia la media
+        
+        if cv <= CV_THRESHOLD_CAUTION:
             return valor, False
+            
+        # Factor de regresión lineal basado en exceso de CV
+        exceso_cv = cv - CV_THRESHOLD_CAUTION
+        dampening_factor = min(exceso_cv * 0.5, MAX_DAMPENING)
         
-        # Factor de duda: qué tanto nos movemos hacia la media
-        # Si CV es 1.0, dampening es 0.25 (movemos 25% el valor hacia la media)
-        dampening = min((cv - CV_THRESHOLD) * 0.5, 0.30) 
+        # Fórmula: (Valor * (1 - w)) + (Media * w)
+        # Asumimos que la media del equipo tiende a media_global/2 (promedio por bando)
+        media_esperada_equipo = media_global / 2
         
-        # Fórmula de Regresión: (1 - w) * Valor + w * Media
-        valor_ajustado = (valor * (1 - dampening)) + ((media_ref / 2) * dampening)
+        valor_ajustado = (valor * (1 - dampening_factor)) + (media_esperada_equipo * dampening_factor)
+        
         return valor_ajustado, True
 
-    final_lambda_local, reg_l = aplicar_dampening(lambda_local_sos, cv_local_af, media_referencia)
-    final_lambda_visit, reg_v = aplicar_dampening(lambda_visit_sos, cv_visit_af, media_referencia)
+    # Aplicamos regresión
+    lambda_local_adapt, reg_l = aplicar_regresion_volatilidad(lambda_local_sos, cv_local_af, media_ref)
+    lambda_visit_adapt, reg_v = aplicar_regresion_volatilidad(lambda_visit_sos, cv_visit_af, media_ref)
 
     if reg_l or reg_v:
-        ajuste_aplicado.append("VOLATILIDAD")
-
-    # Etiqueta final del método para el frontend
-    if ajuste_aplicado:
-        metodo_usado += f" + [{'|'.join(ajuste_aplicado)}]"
+        ajuste_aplicado.append("VOLATILIDAD(CV)")
 
     # -------------------------------------------------------------------------
-    # 6. RETORNO FINAL
+    # 5. CAPA DE CALIBRACIÓN V9 (DAMPENING ESTRUCTURAL) — [NUEVO]
     # -------------------------------------------------------------------------
-    # Tamaño de muestra efectivo (el eslabón más débil)
-    n = min(local_af["n"], local_ec["n"], visit_af["n"], visit_ec["n"])
+    # Ajuste fino basado en la correlación real de métricas (Bundesliga 24/25).
+    # Diferencia entre eventos de "Suerte/Arbitro" (Tarjetas) vs "Física" (Tiros).
     
-    # -------------------------------------------------------------------------
-    # [MEJORA ADITIVA V9 - CALIBRACIÓN FINAL BUNDESLIGA 24/25] EFICIENCIA DEFENSIVA
-    # -------------------------------------------------------------------------
-    # CALIBRACIÓN REALIZADA CON DATA REAL (150 PARTIDOS)
-    # Lógica: Asignamos dampening basado en la correlación estadística (R²) real detectada.
-    
-    # --- PARCHE DE SEGURIDAD PARA 'tipo_evento' ---
-    # Intentamos detectar el nombre de la variable del bucle
-    if 'k' in locals(): tipo_evento = k
-    elif 'stat' in locals(): tipo_evento = stat
-    elif 'key' in locals(): tipo_evento = key
-    elif 'evento' in locals(): tipo_evento = evento
-    else: tipo_evento = "Desconocido"
-    # ----------------------------------------------
+    final_lambda_local = lambda_local_adapt
+    final_lambda_visit = lambda_visit_adapt
 
-    # 1. DICCIONARIO DE CONFIGURACIÓN (Los Números Mágicos V9)
+    # Diccionario de Coeficientes V9 (Calibrado)
     dampening_config = {
-        "Goles": 0.50,              # Alta influencia defensiva (evitar gol).
-        "Remates a Puerta": 0.29,   # R²=0.29 encontrado. Ajuste preciso.
-        "Remates (Shots)": 0.24,    # R²=0.24 encontrado. SUBIDA CRÍTICA (antes 0.15).
-        "Córners": 0.15,            # R²=0.18 encontrado. Se mantiene estable.
-        "Faltas": 0.05,             # R²=0.00. DESACOPLADO (No depende de la defensa rival).
-        "Tarjetas Amarillas": 0.05, # R²=0.08. DESACOPLADO (Arbitraje/Estilo propio).
-        "default": 0.15             # Valor seguro para otras métricas.
+        "Goles": 0.50,              # Goles: 50% Ataque / 50% Defensa
+        "goals": 0.50,
+        "Remates": 0.24,            # Remates: 76% Ataque / 24% Defensa (Permisivo)
+        "Remates (Shots)": 0.24,
+        "shots": 0.24,
+        "Remates a Puerta": 0.29,   # Precisión: 29% influencia defensiva
+        "shots_on_target": 0.29,
+        "Córners": 0.15,            # Poca influencia defensiva
+        "corners": 0.15,
+        "Faltas": 0.05,             # Casi nula influencia defensiva (Estilo propio)
+        "fouls": 0.05,
+        "Tarjetas": 0.05,           # Arbitraje manda
+        "cards": 0.05,
+        "default": 0.15
     }
 
+    # Detección inteligente del tipo de evento
+    key_found = "default"
+    if tipo_evento in dampening_config:
+        key_found = tipo_evento
+    else:
+        # Búsqueda heurística por texto
+        evt_lower = str(tipo_evento).lower()
+        if "gol" in evt_lower: key_found = "Goles"
+        elif "shot" in evt_lower or "remate" in evt_lower:
+            if "target" in evt_lower or "puerta" in evt_lower: key_found = "Remates a Puerta"
+            else: key_found = "Remates (Shots)"
+        elif "corner" in evt_lower: key_found = "Córners"
+        elif "card" in evt_lower or "tarjeta" in evt_lower: key_found = "Tarjetas"
+        elif "foul" in evt_lower or "falta" in evt_lower: key_found = "Faltas"
+
+    # Obtener coeficiente V9
+    target_dampening = dampening_config.get(key_found, 0.15)
+
+    # Lógica de Ajuste V9
     if media_liga and media_liga > 0:
-        # 2. INFERENCIA INTELIGENTE DEL TIPO DE EVENTO
-        # Si el engine no nos dice qué evento es, lo adivinamos por su media histórica o nombre.
+        avg_conceded = media_liga / 2
         
-        target_dampening = 0.15 # Default
-        clamp_max = 1.25
+        # Calculamos qué tan buena/mala es la defensa del rival comparada con la media
+        # Si la defensa es NORMAL, factor ~ 1.0 -> No hay cambio.
+        # Si la defensa es MUY MALA, factor > 1.0 -> Aumenta lambda.
+        f_def_visit = l_visit_ec / avg_conceded if avg_conceded > 0 else 1.0
+        f_def_local = l_local_ec / avg_conceded if avg_conceded > 0 else 1.0
 
-        str_evento = str(tipo_evento) # Convertir a string para buscar palabras clave
-
-        # A) Zona Disciplinaria (Tarjetas ~3-5, Rojas <0.5)
-        # Si la media es muy baja (Rojas) o es zona de tarjetas y el nombre lo confirma
-        if media_liga < 0.5 or (media_liga < 6.0 and ("Tarjeta" in str_evento or "Card" in str_evento)):
-             target_dampening = 0.05 # Desacople (El estilo del árbitro pesa más)
-             clamp_max = 1.15
-
-        # B) Zona de Goles (~2.5 - 3.5)
-        elif media_liga < 4.0: 
-             target_dampening = 0.50 # La defensa es vital aquí
-             clamp_max = 1.35
-
-        # C) Zona Intermedia: Córners (~9-10) vs Tiros a Puerta (~8-10)
-        elif media_liga < 12.0:
-             # Truco: Si la media es > 8.0 suele ser SoT (Tiros a Puerta) o Córners altos
-             # Si el nombre dice explícitamente "Puerta", "SoT" o "Target", usamos 0.30
-             if "Puerta" in str_evento or "SoT" in str_evento or "Target" in str_evento:
-                 target_dampening = 0.30 
-             elif media_liga > 8.5 and "Corner" not in str_evento: # Probable SoT si no dice Corner
-                 target_dampening = 0.30
-             else: 
-                 target_dampening = 0.15 # Córners
-
-        # D) Zona de Alto Volumen: Faltas (~22) vs Remates Totales (~26)
-        else: 
-             # Diferenciamos por magnitud o nombre
-             # Faltas suelen ser menores que Tiros Totales, pero cercano.
-             if "Remates" in str_evento or "Shots" in str_evento or media_liga > 23.0:
-                 target_dampening = 0.24 # Remates: La defensa SÍ influye (0.24)
-             else:
-                 target_dampening = 0.05 # Faltas: La defensa NO influye (0.05)
-
-        # 3. CÁLCULO DE FACTORES DE AJUSTE
-        # Comparamos la "Eficiencia en Contra" (EC) con la media de la liga
+        # Aplicamos el "Freno" (Dampening) al factor defensivo
+        # Si target_dampening es bajo (ej. 0.05), la defensa importa poco -> adj se acerca a 1.0
+        adj_visit = (f_def_visit - 1) * target_dampening + 1
+        adj_local = (f_def_local - 1) * target_dampening + 1
         
-        ec_visit_avg = visit_ec.get('media', media_liga)
-        raw_factor_visit = ec_visit_avg / (media_liga / 2)
+        # Clamps (Límites de seguridad para evitar explosiones)
+        max_clamp = 1.35 if "Gol" in key_found else 1.25
+        min_clamp = 0.80
         
-        ec_local_avg = local_ec.get('media', media_liga)
-        raw_factor_local = ec_local_avg / (media_liga / 2)
-
-        # 4. APLICACIÓN DEL DAMPENING (Freno)
-        # Fórmula: Factor_Final = (Factor_Crudo - 1) * Dampening + 1
-        adj_factor_visit = (raw_factor_visit - 1) * target_dampening + 1
-        adj_factor_local = (raw_factor_local - 1) * target_dampening + 1
+        adj_visit = max(min_clamp, min(adj_visit, max_clamp))
+        adj_local = max(min_clamp, min(adj_local, max_clamp))
         
-        # 5. CLAMPS DE SEGURIDAD (Límites)
-        # Evitamos que una defensa muy mala o muy buena rompa la predicción
-        adj_factor_visit = max(0.80, min(adj_factor_visit, clamp_max))
-        adj_factor_local = max(0.80, min(adj_factor_local, clamp_max))
-
-        # 6. APLICACIÓN FINAL AL LAMBDA
-        final_lambda_local = final_lambda_local * adj_factor_visit
-        final_lambda_visit = final_lambda_visit * adj_factor_local
+        # Aplicamos el ajuste V9 sobre las lambdas ya adaptadas
+        # Nota: Usamos la lambda base (raw) para el cálculo multiplicativo puro
+        # y luego modulamos con el V9. Esto es híbrido.
+        # Para respetar tu lógica anterior, aplicamos sobre la lambda que traíamos (adaptada).
         
-        # Log para depuración
-        tag_damp = f"D{int(target_dampening*100)}"
-        ajuste_aplicado.append(f"DEF_V9[{tag_damp}](v{round(adj_factor_visit,2)}|l{round(adj_factor_local,2)})")
+        final_lambda_local = final_lambda_local * adj_visit
+        final_lambda_visit = final_lambda_visit * adj_local
+        
+        # Registramos que se usó V9
+        if abs(adj_visit - 1.0) > 0.01 or abs(adj_local - 1.0) > 0.01:
+            tag = f"V9({key_found}:{target_dampening})"
+            if tag not in ajuste_aplicado:
+                ajuste_aplicado.append(tag)
 
     # -------------------------------------------------------------------------
-    # FIN BLOQUE ADITIVO V9
+    # 6. CONSTRUCCIÓN DEL DIAGNÓSTICO
     # -------------------------------------------------------------------------
+    if ajuste_aplicado:
+        metodo_usado += f" + [{'|'.join(ajuste_aplicado)}]"
 
     return {
         "lambda_local": round(final_lambda_local, 4),
         "lambda_visitante": round(final_lambda_visit, 4),
         "lambda_total": round(final_lambda_local + final_lambda_visit, 4),
-        "n": n,
+        "n": n_efectivo,
         "metodo": metodo_usado,
-        "raw_local": round(raw_lambda_local, 4),    # Para depuración
-        "raw_visit": round(raw_lambda_visit, 4)     # Para depuración
-    }
+        # Datos extra para debug/auditoría
+        "raw_local_base": round(raw_lambda_local, 4),
+        "raw_visit_
