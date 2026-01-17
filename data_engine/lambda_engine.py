@@ -140,86 +140,84 @@ def construir_lambdas(
     n = min(local_af["n"], local_ec["n"], visit_af["n"], visit_ec["n"])
     
     # -------------------------------------------------------------------------
-    # [MEJORA ADITIVA V5 - CALIBRACIÓN GRANULAR BUNDESLIGA] EFICIENCIA DEFENSIVA
+    # [MEJORA ADITIVA V9 - CALIBRACIÓN FINAL BUNDESLIGA] EFICIENCIA DEFENSIVA
     # -------------------------------------------------------------------------
-    # CALIBRACIÓN REALIZADA EL: 2026-01-16 (Base: 150 Partidos 24/25)
-    # Lógica: Asignamos un dampening basado en la correlación estadística (R²) real.
+    # CALIBRACIÓN REALIZADA CON DATA REAL (150 PARTIDOS - TEMP 24/25)
+    # Lógica: Asignamos dampening basado en la correlación estadística (R²) real detectada.
     
-    # 1. DICCIONARIO DE CONFIGURACIÓN (El Cerebro Calibrado)
-    # Valores derivados de Regresión Lineal (Offline V10):
-    # - Goles: 0.50 (Varianza alta, defensa influye mucho en evitar fallo)
-    # - Remates a Puerta (SoT): 0.30 (R² detectado de 0.29 -> Redondeado a 0.30)
-    # - Remates (Shots): 0.24 (R² detectado de 0.239 -> Exacto 0.24)
-    # - Córners: 0.15 (Estándar conservador)
+    # 1. DICCIONARIO DE CONFIGURACIÓN (Los Números Mágicos)
     dampening_config = {
-        "Goles": 0.50,              
-        "Remates a Puerta": 0.30,   # SUBIDA: La defensa real frena más de lo que pensábamos.
-        "Remates (Shots)": 0.24,    # SUBIDA: De 0.15 a 0.24. Ajuste crítico por volumen.
-        "Córners": 0.15,            
-        "Tarjetas Amarillas": 0.05, # Desacoplado
-        "Faltas": 0.05,             # Desacoplado
-        "default": 0.15             
+        "Goles": 0.50,              # Alta influencia defensiva (evitar gol).
+        "Remates a Puerta": 0.30,   # R²=0.29 encontrado. Ajuste preciso.
+        "Remates (Shots)": 0.24,    # R²=0.24 encontrado. SUBIDA CRÍTICA (antes 0.15).
+        "Córners": 0.15,            # R²=0.18 encontrado. Se mantiene estable.
+        "Faltas": 0.05,             # R²=0.00. DESACOPLADO (No depende de la defensa rival).
+        "Tarjetas Amarillas": 0.05, # R²=0.08. DESACOPLADO (Arbitraje/Estilo propio).
+        "default": 0.15             # Valor seguro para otras métricas.
     }
 
     if media_liga and media_liga > 0:
-        # LÓGICA HÍBRIDA MEJORADA CON NUEVOS UMBRALES:
+        # 2. INFERENCIA INTELIGENTE DEL TIPO DE EVENTO
+        # Si el engine no nos dice qué evento es, lo adivinamos por su media histórica.
+        
         target_dampening = 0.15 # Default
         clamp_max = 1.25
 
-        # Inferencia por magnitud de la media 
-        if media_liga < 0.5: # Rojas
-            target_dampening = 0.05 
-        elif media_liga < 4.0: # Goles (o Tarjetas bajas)
-            # Goles sigue mandando con fuerza defensiva
-            target_dampening = 0.50
-            clamp_max = 1.35
-            
-            # PARCHE DE SEGURIDAD PARA TARJETAS
-            if 3.5 <= media_liga <= 6.0: 
-                target_dampening = 0.05 # Tarjetas son aleatorias, poco dampening
-                clamp_max = 1.15
-        
-        elif media_liga < 12.0: # Córners, Tiros a Puerta (~8-10)
-            # Aquí caen los SoT (Tiros a Puerta)
-            # Si es SoT (media ~8-10), aplicamos el nuevo 0.30
-            if media_liga > 7.0: 
-                target_dampening = 0.30 # Calibración SoT
-            else:
-                target_dampening = 0.15 # Córners
-                
-        else: # Faltas (~22), Remates Totales (~26)
-            # Diferenciamos por magnitud
-            if media_liga > 20.0: 
-                # Zona de Remates Totales (Shots)
-                # Aplicamos el R² calculado de 0.24
-                target_dampening = 0.24 
-            else:
-                # Zona intermedia (Faltas o Tiros bajos)
-                target_dampening = 0.10
+        # A) Zona Disciplinaria (Tarjetas ~3-5, Rojas <0.5)
+        if media_liga < 0.5 or (media_liga < 6.0 and "Tarjeta" in str(tipo_evento)):
+             target_dampening = 0.05 # Desacople (El estilo del árbitro pesa más)
+             clamp_max = 1.15
 
-        # 2. CÁLCULO DE FACTORES
+        # B) Zona de Goles (~2.5 - 3.5)
+        elif media_liga < 4.0: 
+             target_dampening = 0.50 # La defensa es vital aquí
+             clamp_max = 1.35
+
+        # C) Zona Intermedia: Córners (~9-10) vs Tiros a Puerta (~8-10)
+        elif media_liga < 12.0:
+             # Truco: Si la media es > 8.5 suele ser SoT (Tiros a Puerta) sumados
+             if media_liga > 8.0 or "Puerta" in str(tipo_evento): 
+                 target_dampening = 0.30 # Usamos el coeficiente fuerte
+             else: 
+                 target_dampening = 0.15 # Córners
+
+        # D) Zona de Alto Volumen: Faltas (~22) vs Remates Totales (~26)
+        else: 
+             # Diferenciamos por magnitud o nombre
+             if media_liga > 23.0 or "Remates" in str(tipo_evento):
+                 target_dampening = 0.24 # Remates: La defensa SÍ influye
+             else:
+                 target_dampening = 0.05 # Faltas: La defensa NO influye (0.05)
+
+        # 3. CÁLCULO DE FACTORES DE AJUSTE
+        # Comparamos la "Eficiencia en Contra" (EC) con la media de la liga
+        
         ec_visit_avg = visit_ec.get('media', media_liga)
         raw_factor_visit = ec_visit_avg / (media_liga / 2)
         
         ec_local_avg = local_ec.get('media', media_liga)
         raw_factor_local = ec_local_avg / (media_liga / 2)
 
-        # 3. APLICACIÓN
+        # 4. APLICACIÓN DEL DAMPENING (Freno)
+        # Fórmula: Factor_Final = (Factor_Crudo - 1) * Dampening + 1
         adj_factor_visit = (raw_factor_visit - 1) * target_dampening + 1
         adj_factor_local = (raw_factor_local - 1) * target_dampening + 1
         
-        # Clamps (Ligeramente ajustados para permitir la nueva varianza)
+        # 5. CLAMPS DE SEGURIDAD (Límites)
+        # Evitamos que una defensa muy mala o muy buena rompa la predicción
         adj_factor_visit = max(0.80, min(adj_factor_visit, clamp_max))
         adj_factor_local = max(0.80, min(adj_factor_local, clamp_max))
 
+        # 6. APLICACIÓN FINAL AL LAMBDA
         final_lambda_local = final_lambda_local * adj_factor_visit
         final_lambda_visit = final_lambda_visit * adj_factor_local
         
+        # Log para depuración
         tag_damp = f"D{int(target_dampening*100)}"
-        ajuste_aplicado.append(f"DEF[{tag_damp}](v{round(adj_factor_visit,2)}|l{round(adj_factor_local,2)})")
+        ajuste_aplicado.append(f"DEF_V9[{tag_damp}](v{round(adj_factor_visit,2)}|l{round(adj_factor_local,2)})")
 
     # -------------------------------------------------------------------------
-    # FIN BLOQUE ADITIVO V5
+    # FIN BLOQUE ADITIVO V9
     # -------------------------------------------------------------------------
     
 
