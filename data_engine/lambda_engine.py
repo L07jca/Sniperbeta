@@ -157,7 +157,7 @@ def construir_lambdas(
     # 1. DICCIONARIO DE CONFIGURACIÓN (Los Números Mágicos V9)
     dampening_config = {
         "Goles": 0.50,              # Alta influencia defensiva (evitar gol).
-        "Remates a Puerta": 0.30,   # R²=0.29 encontrado. Ajuste preciso.
+        "Remates a Puerta": 0.29,   # R²=0.29 encontrado. Ajuste preciso.
         "Remates (Shots)": 0.24,    # R²=0.24 encontrado. SUBIDA CRÍTICA (antes 0.15).
         "Córners": 0.15,            # R²=0.18 encontrado. Se mantiene estable.
         "Faltas": 0.05,             # R²=0.00. DESACOPLADO (No depende de la defensa rival).
