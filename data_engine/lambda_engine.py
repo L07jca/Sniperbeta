@@ -140,64 +140,62 @@ def construir_lambdas(
     n = min(local_af["n"], local_ec["n"], visit_af["n"], visit_ec["n"])
     
     # -------------------------------------------------------------------------
-    # [MEJORA ADITIVA V5 - CALIBRACIÓN GRANULAR] EFICIENCIA DEFENSIVA
+    # [MEJORA ADITIVA V5 - CALIBRACIÓN GRANULAR BUNDESLIGA] EFICIENCIA DEFENSIVA
     # -------------------------------------------------------------------------
-    # Lógica: Asignamos un dampening específico por TIPO DE EVENTO.
-    # Ya no agrupamos por frecuencia, sino por naturaleza del juego.
+    # CALIBRACIÓN REALIZADA EL: 2026-01-16 (Base: 150 Partidos 24/25)
+    # Lógica: Asignamos un dampening basado en la correlación estadística (R²) real.
     
-    # 1. DICCIONARIO DE CONFIGURACIÓN (El Cerebro)
-    # Define cuánto afecta la "Debilidad Defensiva" a cada métrica.
-    # 0.50 = Afecta mucho (Goles)
-    # 0.05 = Afecta casi nada (Tarjetas/Faltas)
+    # 1. DICCIONARIO DE CONFIGURACIÓN (El Cerebro Calibrado)
+    # Valores derivados de Regresión Lineal (Offline V10):
+    # - Goles: 0.50 (Varianza alta, defensa influye mucho en evitar fallo)
+    # - Remates a Puerta (SoT): 0.30 (R² detectado de 0.29 -> Redondeado a 0.30)
+    # - Remates (Shots): 0.24 (R² detectado de 0.239 -> Exacto 0.24)
+    # - Córners: 0.15 (Estándar conservador)
     dampening_config = {
-        "Goles": 0.50,              # La defensa mala causa goles directos.
-        "Remates a Puerta": 0.25,   # La defensa mala permite tiros cómodos.
-        "Remates (Shots)": 0.15,    # Mucho volumen, requiere freno.
-        "Córners": 0.15,            # Volátil, freno fuerte.
-        "Tarjetas Amarillas": 0.05, # DESACOPLADO: Debilidad != Tarjetas.
-        "Faltas": 0.05,             # DESACOPLADO: Debilidad != Faltas.
-        "default": 0.15             # Valor seguro para otros.
+        "Goles": 0.50,              
+        "Remates a Puerta": 0.30,   # SUBIDA: La defensa real frena más de lo que pensábamos.
+        "Remates (Shots)": 0.24,    # SUBIDA: De 0.15 a 0.24. Ajuste crítico por volumen.
+        "Córners": 0.15,            
+        "Tarjetas Amarillas": 0.05, # Desacoplado
+        "Faltas": 0.05,             # Desacoplado
+        "default": 0.15             
     }
 
     if media_liga and media_liga > 0:
-        # Detectar qué métrica estamos procesando (Truco: usamos keys del dict de entrada)
-        # Esto asume que el engine pasa un identificador o inferimos por contexto.
-        # Si no tienes el nombre exacto disponible aquí, usaremos la frecuencia como fallback inteligente.
-        
-        # Como lambda_engine a veces es agnóstico, intentamos inferir o usar lógica híbrida.
-        # Para integrarlo sin romper tu código actual, usaremos una lógica de mapeo inversa si es posible,
-        # o mantenemos la lógica de frecuencia PERO con la excepción disciplinaria.
-        
-        # LÓGICA HÍBRIDA MEJORADA:
+        # LÓGICA HÍBRIDA MEJORADA CON NUEVOS UMBRALES:
         target_dampening = 0.15 # Default
         clamp_max = 1.25
 
-        # Inferencia por magnitud de la media (Más robusto que nombres si no llegan)
-        if media_liga < 0.5: # ¿Rojas?
+        # Inferencia por magnitud de la media 
+        if media_liga < 0.5: # Rojas
             target_dampening = 0.05 
-        elif media_liga < 4.0: # Goles o Tarjetas
-            # AQUÍ ESTÁ EL TRUCO: ¿Cómo diferenciar Goles de Tarjetas solo por números?
-            # Goles suelen tener lambdas locales > visitantes. Tarjetas al revés o parejas.
-            # O mejor: Asumimos Goles (0.50) por defecto, PERO si detectamos
-            # que es un mercado disciplinario en el futuro, lo bajamos.
-            # Por ahora, mantengamos 0.50 para Goles que es lo vital.
+        elif media_liga < 4.0: # Goles (o Tarjetas bajas)
+            # Goles sigue mandando con fuerza defensiva
             target_dampening = 0.50
             clamp_max = 1.35
             
-            # PARCHE DE SEGURIDAD PARA TARJETAS (Si la media es típica de tarjetas ~3.5-4.5)
-            # Si media_liga está entre 3.0 y 5.0, es zona peligrosa (Goles altos o Tarjetas).
-            # Ante la duda en esta zona, usamos conservador.
+            # PARCHE DE SEGURIDAD PARA TARJETAS
             if 3.5 <= media_liga <= 6.0: 
-                target_dampening = 0.05 # Asumimos Tarjetas
+                target_dampening = 0.05 # Tarjetas son aleatorias, poco dampening
                 clamp_max = 1.15
         
-        elif media_liga < 12.0: # Córners, Tiros a Puerta
-            target_dampening = 0.15
-        else: # Faltas, Remates (>12)
-            # Diferenciamos Faltas de Remates?
-            # Las faltas suelen ser ~20-25. Remates ~24-28.
-            # Aplicamos freno fuerte a ambos.
-            target_dampening = 0.10 # Bajamos a 0.10 para limpiar ruido (Faltas/Remates)
+        elif media_liga < 12.0: # Córners, Tiros a Puerta (~8-10)
+            # Aquí caen los SoT (Tiros a Puerta)
+            # Si es SoT (media ~8-10), aplicamos el nuevo 0.30
+            if media_liga > 7.0: 
+                target_dampening = 0.30 # Calibración SoT
+            else:
+                target_dampening = 0.15 # Córners
+                
+        else: # Faltas (~22), Remates Totales (~26)
+            # Diferenciamos por magnitud
+            if media_liga > 20.0: 
+                # Zona de Remates Totales (Shots)
+                # Aplicamos el R² calculado de 0.24
+                target_dampening = 0.24 
+            else:
+                # Zona intermedia (Faltas o Tiros bajos)
+                target_dampening = 0.10
 
         # 2. CÁLCULO DE FACTORES
         ec_visit_avg = visit_ec.get('media', media_liga)
@@ -210,9 +208,9 @@ def construir_lambdas(
         adj_factor_visit = (raw_factor_visit - 1) * target_dampening + 1
         adj_factor_local = (raw_factor_local - 1) * target_dampening + 1
         
-        # Clamps
-        adj_factor_visit = max(0.85, min(adj_factor_visit, clamp_max))
-        adj_factor_local = max(0.85, min(adj_factor_local, clamp_max))
+        # Clamps (Ligeramente ajustados para permitir la nueva varianza)
+        adj_factor_visit = max(0.80, min(adj_factor_visit, clamp_max))
+        adj_factor_local = max(0.80, min(adj_factor_local, clamp_max))
 
         final_lambda_local = final_lambda_local * adj_factor_visit
         final_lambda_visit = final_lambda_visit * adj_factor_local
@@ -223,8 +221,6 @@ def construir_lambdas(
     # -------------------------------------------------------------------------
     # FIN BLOQUE ADITIVO V5
     # -------------------------------------------------------------------------
-
-
     
 
     return {
