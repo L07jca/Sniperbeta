@@ -3,8 +3,17 @@ import numpy as np
 from collections import Counter
 from statistics import median
 
-from config import Config
-from event_config import get_event_config
+# Intentamos importar config, si falla usamos defaults para evitar errores circulares
+try:
+    from config import Config
+except ImportError:
+    class Config:
+        MIN_MATCHES_DATA = 5
+
+try:
+    from event_config import get_event_config
+except ImportError:
+    get_event_config = None
 
 
 # =============================================================================
@@ -12,11 +21,8 @@ from event_config import get_event_config
 # =============================================================================
 def _time_decay_weights(n, alpha=0.15):
     """
-    CORREGIDO: Genera pesos exponenciales para Time Decay.
-    
+    Genera pesos exponenciales para Time Decay.
     Asume que datos[0] es el MÁS RECIENTE (izquierda).
-    - i = 0 (reciente) -> peso máximo (exp(0) = 1.0)
-    - i aumenta (antiguo) -> peso disminuye
     """
     # Se usa 'i' directamente como exponente de decaimiento
     w = np.array([math.exp(-alpha * i) for i in range(n)])
@@ -25,9 +31,13 @@ def _time_decay_weights(n, alpha=0.15):
     return w / w.sum()
 
 
-def _detectar_outliers_iqr(data):
+def _detectar_outliers_iqr(data, factor=3.0):
     """
     Detecta valores atípicos usando el rango intercuartílico (IQR).
+    
+    MEJORA BETA: Se aumentó el factor de 1.5 (Estándar) a 3.0 (Permisivo).
+    Esto evita que goleadas reales (ej: 6-1) sean eliminadas del análisis
+    en equipos Top como Bayern o City.
     """
     if len(data) < 4:
         return []
@@ -39,8 +49,9 @@ def _detectar_outliers_iqr(data):
     q3 = sorted_data[(3 * n) // 4]
     iqr = q3 - q1
 
-    lower = q1 - 1.5 * iqr
-    upper = q3 + 1.5 * iqr
+    # Rango Extendido (Solo borra anomalías extremas, no partidos buenos)
+    lower = q1 - factor * iqr
+    upper = q3 + factor * iqr
 
     return [x for x in data if x < lower or x > upper]
 
@@ -62,12 +73,13 @@ def calcular_metricas_desde_datos(
     # -------------------------------------------------------------------------
     # 1. Configuración y Validaciones
     # -------------------------------------------------------------------------
-    try:
-        event_cfg = get_event_config(event_type)
-    except Exception:
-        # Fallback de seguridad si el evento no existe en config
-        from event_config import EVENTS
-        event_cfg = list(EVENTS.values())[0]
+    cv_expected = 1.0
+    if get_event_config:
+        try:
+            event_cfg = get_event_config(event_type)
+            cv_expected = getattr(event_cfg, 'cv_expected', 1.0)
+        except Exception:
+            pass
 
     if not isinstance(datos, (list, tuple)):
         raise ValueError("Los datos deben ser una lista o tupla")
@@ -92,19 +104,36 @@ def calcular_metricas_desde_datos(
             "cv": 0.0
         }
 
-    arr = np.array(datos_limpios)
+    # -------------------------------------------------------------------------
+    # 2. Detección de Outliers (MEJORADO)
+    # -------------------------------------------------------------------------
+    # Primero detectamos outliers pero NO los borramos inmediatamente si usamos Time Decay,
+    # ya que el Time Decay por sí solo ya penaliza lo antiguo.
+    # Sin embargo, para mantener la higiene, borraremos solo los EXTREMOS (Factor 3.0).
+    
+    outliers = _detectar_outliers_iqr(datos_limpios, factor=3.0)
+    
+    # Filtramos los datos para el cálculo (Winsorizing suave)
+    datos_calc = [x for x in datos_limpios if x not in outliers]
+    n_calc = len(datos_calc)
+    
+    if n_calc < 1: # Si borramos todo (raro), usamos los originales
+        datos_calc = datos_limpios
+        n_calc = n
+
+    arr = np.array(datos_calc)
 
     # -------------------------------------------------------------------------
-    # 2. Cálculo de Media y Varianza (Con Time Decay Corregido)
+    # 3. Cálculo de Media y Varianza (Con Time Decay)
     # -------------------------------------------------------------------------
     if usar_time_decay:
-        w = _time_decay_weights(n)
+        w = _time_decay_weights(n_calc)
         media = float(np.sum(arr * w))
         # Varianza ponderada
         varianza = float(np.sum(w * (arr - media) ** 2))
     else:
         media = float(arr.mean())
-        varianza = float(arr.var(ddof=1)) if n > 1 else 0.0
+        varianza = float(arr.var(ddof=1)) if n_calc > 1 else 0.0
 
     std = math.sqrt(varianza) if varianza > 0 else 0.0
     
@@ -112,35 +141,26 @@ def calcular_metricas_desde_datos(
     cv = std / media if media > 0 else 0.0
 
     # -------------------------------------------------------------------------
-    # 3. Métricas Adicionales y Outliers
+    # 4. Métricas Adicionales
     # -------------------------------------------------------------------------
-    # CV Normalizado vs Esperado del evento
-    cv_expected = getattr(event_cfg, 'cv_expected', 1.0)
     cv_norm = cv / cv_expected if cv_expected > 0 else cv
 
-    rango = float(arr.max() - arr.min())
-    mediana = float(median(arr))
+    rango = float(arr.max() - arr.min()) if n_calc > 0 else 0.0
+    mediana = float(median(arr)) if n_calc > 0 else 0.0
     
-    # Moda (Manejo seguro si hay múltiples modas o array vacío)
-    if n > 0:
+    if n_calc > 0:
         counts = Counter(arr)
         moda = float(counts.most_common(1)[0][0])
     else:
         moda = 0.0
 
-    outliers = _detectar_outliers_iqr(arr.tolist())
-
     # -------------------------------------------------------------------------
-    # 4. Flags de Diagnóstico
+    # 5. Flags de Diagnóstico
     # -------------------------------------------------------------------------
     flags = []
 
     if media <= 0:
         flags.append("MEDIA_INVALIDA")
-
-    if std == 0 and media > 0:
-        # Nota: Varianza 0 es posible matemáticamente pero rara en deportes
-        pass 
 
     if cv_norm >= 1.5:
         flags.append("CV_MUY_ALTO")
@@ -148,7 +168,7 @@ def calcular_metricas_desde_datos(
         flags.append("CV_ALTO")
 
     if outliers:
-        flags.append("OUTLIERS_PRESENTES")
+        flags.append("OUTLIERS_DETECTADOS")
 
     # Estado humano legible
     if cv_norm >= 1.5:
@@ -159,7 +179,7 @@ def calcular_metricas_desde_datos(
         estado = "ESTABLE"
 
     # -------------------------------------------------------------------------
-    # 5. Retorno Estructurado
+    # 6. Retorno Estructurado
     # -------------------------------------------------------------------------
     es_valido = "MEDIA_INVALIDA" not in flags
 
@@ -185,4 +205,3 @@ def calcular_metricas_desde_datos(
         resultado["outliers"] = outliers
 
     return resultado
-
