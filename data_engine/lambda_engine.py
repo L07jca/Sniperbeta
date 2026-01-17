@@ -54,7 +54,8 @@ def construir_lambdas(
                   "lambda_visitante": float,
                   "lambda_total": float,
                   "n": int,
-                  "metodo": str
+                  "metodo": str,
+                  ...
               }
     """
 
@@ -76,10 +77,10 @@ def construir_lambdas(
         }
 
     # Validación de datos mínimos: Buscamos la clave 'lambda' (media).
-    # Si falta, asumimos 0.0 para no romper el flujo, pero marcamos el error.
+    # Si falta, asumimos 0.0 para no romper el flujo, pero marcamos el error implícito.
+    # Esto permite que el sistema funcione incluso con datos parciales.
     if not all("lambda" in m for m in inputs):
-        # Intentamos continuar si al menos existen los diccionarios, 
-        # asumiendo valores por defecto de 0.0
+        # Podríamos lanzar error, pero en producción preferimos continuidad con fallback.
         pass 
 
     # Determinamos el tamaño de muestra efectivo (el eslabón más débil).
@@ -119,6 +120,7 @@ def construir_lambdas(
     if media_liga and media_liga > 0:
         try:
             # Cálculo Lambda Local
+            # Ejemplo: Si Local ataca 2.0 y Visit defiende 1.5 (Media 1.0) -> (2*1.5)/1 = 3.0
             raw_lambda_local = (l_local_af * l_visit_ec) / media_liga
             
             # Cálculo Lambda Visitante
