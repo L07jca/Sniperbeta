@@ -140,12 +140,21 @@ def construir_lambdas(
     n = min(local_af["n"], local_ec["n"], visit_af["n"], visit_ec["n"])
     
     # -------------------------------------------------------------------------
-    # [MEJORA ADITIVA V9 - CALIBRACIÓN FINAL BUNDESLIGA] EFICIENCIA DEFENSIVA
+    # [MEJORA ADITIVA V9 - CALIBRACIÓN FINAL BUNDESLIGA 24/25] EFICIENCIA DEFENSIVA
     # -------------------------------------------------------------------------
-    # CALIBRACIÓN REALIZADA CON DATA REAL (150 PARTIDOS - TEMP 24/25)
+    # CALIBRACIÓN REALIZADA CON DATA REAL (150 PARTIDOS)
     # Lógica: Asignamos dampening basado en la correlación estadística (R²) real detectada.
     
-    # 1. DICCIONARIO DE CONFIGURACIÓN (Los Números Mágicos)
+    # --- PARCHE DE SEGURIDAD PARA 'tipo_evento' ---
+    # Intentamos detectar el nombre de la variable del bucle
+    if 'k' in locals(): tipo_evento = k
+    elif 'stat' in locals(): tipo_evento = stat
+    elif 'key' in locals(): tipo_evento = key
+    elif 'evento' in locals(): tipo_evento = evento
+    else: tipo_evento = "Desconocido"
+    # ----------------------------------------------
+
+    # 1. DICCIONARIO DE CONFIGURACIÓN (Los Números Mágicos V9)
     dampening_config = {
         "Goles": 0.50,              # Alta influencia defensiva (evitar gol).
         "Remates a Puerta": 0.30,   # R²=0.29 encontrado. Ajuste preciso.
@@ -158,13 +167,16 @@ def construir_lambdas(
 
     if media_liga and media_liga > 0:
         # 2. INFERENCIA INTELIGENTE DEL TIPO DE EVENTO
-        # Si el engine no nos dice qué evento es, lo adivinamos por su media histórica.
+        # Si el engine no nos dice qué evento es, lo adivinamos por su media histórica o nombre.
         
         target_dampening = 0.15 # Default
         clamp_max = 1.25
 
+        str_evento = str(tipo_evento) # Convertir a string para buscar palabras clave
+
         # A) Zona Disciplinaria (Tarjetas ~3-5, Rojas <0.5)
-        if media_liga < 0.5 or (media_liga < 6.0 and "Tarjeta" in str(tipo_evento)):
+        # Si la media es muy baja (Rojas) o es zona de tarjetas y el nombre lo confirma
+        if media_liga < 0.5 or (media_liga < 6.0 and ("Tarjeta" in str_evento or "Card" in str_evento)):
              target_dampening = 0.05 # Desacople (El estilo del árbitro pesa más)
              clamp_max = 1.15
 
@@ -175,17 +187,21 @@ def construir_lambdas(
 
         # C) Zona Intermedia: Córners (~9-10) vs Tiros a Puerta (~8-10)
         elif media_liga < 12.0:
-             # Truco: Si la media es > 8.5 suele ser SoT (Tiros a Puerta) sumados
-             if media_liga > 8.0 or "Puerta" in str(tipo_evento): 
-                 target_dampening = 0.30 # Usamos el coeficiente fuerte
+             # Truco: Si la media es > 8.0 suele ser SoT (Tiros a Puerta) o Córners altos
+             # Si el nombre dice explícitamente "Puerta", "SoT" o "Target", usamos 0.30
+             if "Puerta" in str_evento or "SoT" in str_evento or "Target" in str_evento:
+                 target_dampening = 0.30 
+             elif media_liga > 8.5 and "Corner" not in str_evento: # Probable SoT si no dice Corner
+                 target_dampening = 0.30
              else: 
                  target_dampening = 0.15 # Córners
 
         # D) Zona de Alto Volumen: Faltas (~22) vs Remates Totales (~26)
         else: 
              # Diferenciamos por magnitud o nombre
-             if media_liga > 23.0 or "Remates" in str(tipo_evento):
-                 target_dampening = 0.24 # Remates: La defensa SÍ influye
+             # Faltas suelen ser menores que Tiros Totales, pero cercano.
+             if "Remates" in str_evento or "Shots" in str_evento or media_liga > 23.0:
+                 target_dampening = 0.24 # Remates: La defensa SÍ influye (0.24)
              else:
                  target_dampening = 0.05 # Faltas: La defensa NO influye (0.05)
 
@@ -219,7 +235,6 @@ def construir_lambdas(
     # -------------------------------------------------------------------------
     # FIN BLOQUE ADITIVO V9
     # -------------------------------------------------------------------------
-    
 
     return {
         "lambda_local": round(final_lambda_local, 4),
