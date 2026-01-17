@@ -186,7 +186,7 @@ def calcular_metricas_desde_datos(
     resultado = {
         "valido": es_valido,
         "event_type": event_type,
-        "n": n,
+        "n": n_calc, # CORREGIDO: Devolvemos n_calc (real usado) y no n (original)
         "lambda": round(media, 4),      # Lambda crítica para el modelo
         "media": round(media, 4),
         "mediana": round(mediana, 4),
